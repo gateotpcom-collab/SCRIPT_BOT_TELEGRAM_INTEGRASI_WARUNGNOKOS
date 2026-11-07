@@ -1,0 +1,14 @@
+{
+  "name": "INTEGRASI WARUNGNOKOS",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "axios": "^1.7.7",
+    "node-telegram-bot-api": "^0.66.0",
+     "archiver": "^7.0.1"
+  }
+}
