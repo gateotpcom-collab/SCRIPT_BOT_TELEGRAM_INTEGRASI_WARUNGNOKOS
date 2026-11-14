@@ -676,27 +676,90 @@ async function showMainMenu(chatId, userId, username, namaUser = 'Kak') {
 }
 
 // ================= LOGIKA START & FORCE JOIN =================
-bot.onText(/\/start/, (msg) => {
+bot.onText(/^\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+  const username = msg.from.username || '';
   const namaUser = msg.from.first_name || 'Kak';
-  let dbUsers = bacaDatabase();
-  let isUserExist = dbUsers.find(u => u.id === userId);
+  
+  console.log(`[DEBUG START] Pesan /start diterima dari ID: ${userId} | Nama: ${namaUser}`);
 
-  if (isUserExist) {
-    // Contoh pada bot.onText(/\/start/, ...)
-showMainMenu(chatId, msg.from.id, msg.from.username, msg.from.first_name);
+  try {
+    let dbUsers = bacaDatabase();
+    let isUserExist = dbUsers.find(u => String(u.id) === String(userId));
+
+    if (isUserExist) {
+      console.log(`[DEBUG START] User ${userId} sudah terdaftar. Membuka Menu Utama...`);
+      if (isUserExist.username !== username) {
+        isUserExist.username = username;
+        simpanDatabase(dbUsers);
+      }
+      await showMainMenu(chatId, userId, username, namaUser);
+    } else {
+      console.log(`[DEBUG START] User ${userId} belum terdaftar. Mengecek status channel (${CHANNEL_ID})...`);
+      
+      // Jika CHANNEL_ID belum diatur (masih '-' atau kosong), langsung daftarkan user tanpa Force Join
+      if (!CHANNEL_ID || CHANNEL_ID === '-' || CHANNEL_ID.trim() === '') {
+        console.log(`[DEBUG START] CHANNEL_ID kosong, melewati Force Join...`);
+        const waktuDaftar = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+        dbUsers.push({ id: userId, nama: namaUser, username: username, saldo: 0, terdaftarPada: waktuDaftar });
+        simpanDatabase(dbUsers);
+        return await showMainMenu(chatId, userId, username, namaUser);
+      }
+
+      try {
+        const chatMember = await bot.getChatMember(CHANNEL_ID, userId);
+        console.log(`[DEBUG START] Status member di channel: ${chatMember.status}`);
+        
+        if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
+          const waktuDaftar = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+          dbUsers.push({ id: userId, nama: namaUser, username: username, saldo: 0, terdaftarPada: waktuDaftar });
+          simpanDatabase(dbUsers);
+          await showMainMenu(chatId, userId, username, namaUser);
+        } else {
+          await tampilkanPesanWajibJoin(chatId, namaUser);
+        }
+      } catch (errChannel) {
+        console.error(`[DEBUG START ERROR] Gagal cek channel:`, errChannel.message);
+        await tampilkanPesanWajibJoin(chatId, namaUser);
+      }
+    }
+  } catch (errGlobal) {
+    console.error(`[FATAL START ERROR]`, errGlobal.message);
   }
 });
 
-function tampilkanPesanWajibJoin(chatId, namaUser) {
-  const pesan = `⚠️ *Akses Ditolak*\n\nHalo *${namaUser}*, kamu belum terdaftar di database kami.\nUntuk menggunakan bot ini, kamu wajib bergabung ke channel resmi kami terlebih dahulu.`;
+// Fungsi membersihkan karakter HTML agar nama user yang aneh tidak bikin error
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function tampilkanPesanWajibJoin(chatId, namaUser) {
+  const safeName = escapeHtml(namaUser);
+  const pesan = `⚠️ <b>Akses Ditolak</b>\n\n` +
+                `Halo <b>${safeName}</b>, kamu belum terdaftar di database kami.\n` +
+                `Untuk menggunakan bot ini, kamu wajib bergabung ke channel resmi kami terlebih dahulu.`;
+                
   const keyboard = [
     [{ text: "📢 Join Channel Sekarang", url: LINK_CHANNEL }],
-    [{ text: "✅ Saya sudah join", callback_data: `cek_join|${namaUser}` }]
+    [{ text: "✅ Saya sudah join", callback_data: `cek_join|${safeName.substring(0, 20)}` }]
   ];
-  bot.sendMessage(chatId, pesan, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+
+  try {
+    await bot.sendMessage(chatId, pesan, { 
+      parse_mode: 'HTML', 
+      reply_markup: { inline_keyboard: keyboard } 
+    });
+    console.log(`[DEBUG START] Pesan Wajib Join berhasil dikirim ke ${chatId}`);
+  } catch (err) {
+    console.error(`[ERROR KIRIM WAJIB JOIN] Gagal mengirim pesan ke ${chatId}:`, err.message);
+  }
 }
+
+
 
 // ================= FITUR ADMIN MENU =================
 bot.onText(/\/adminmenu/, async (msg) => {
@@ -759,41 +822,47 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       return;
     }
 
-        if (data.startsWith('cek_join|')) {
+            if (data.startsWith('cek_join|')) {
       const namaUser = data.split('|')[1];
+      const username = query.from.username || '';
       bot.answerCallbackQuery(query.id, { text: 'Mengecek status channel...' });
-      const chatMember = await bot.getChatMember(CHANNEL_ID, userId);
       
-      if (chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator') {
-        // Ambil waktu pendaftaran saat ini
-        const waktuDaftar = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+      try {
+        const chatMember = await bot.getChatMember(CHANNEL_ID, userId);
         
-        dbUsers.push({ id: userId, nama: namaUser, saldo: 0, terdaftarPada: waktuDaftar });
-        simpanDatabase(dbUsers);
-        
-        await bot.deleteMessage(chatId, messageId).catch(() => {});
-        showMainMenu(chatId, namaUser);
+        if (chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator') {
+          const waktuDaftar = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+          
+          dbUsers.push({ id: userId, nama: namaUser, username: username, saldo: 0, terdaftarPada: waktuDaftar });
+          simpanDatabase(dbUsers);
+          
+          await bot.deleteMessage(chatId, messageId).catch(() => {});
+          // PERBAIKAN: Kirim 4 parameter lengkap ke showMainMenu
+          showMainMenu(chatId, userId, username, namaUser);
 
-        // --- NOTIFIKASI KE CHANNEL LOG ---
-        const textLog = `<blockquote>` +
-                        `┌ 👤 <b>PENGGUNA BARU</b>\n` +
-                        `├ 📛 Username : ${query.from.username ? '@' + query.from.username : 'Tidak ada username'}\n` +
-                        `├ 🆔 ID User : <code>${userId}</code>\n` +
-                        `└ ⏰ Waktu : ${waktuDaftar}\n\n` +
-                        `💙 Pengguna berhasil melewati Force Join.` +
-                        `</blockquote>`;
-        const btnLog = [
-          [{ text: 'Cek Profile User', callback_data: `cek_user|${userId}`, style: 'primary' }]
-        ];
-        
-        // Kirim ke Channel tanpa mengganggu proses di bot pengguna
-        bot.sendMessage(LOG_CHANNEL, textLog, { parse_mode: 'HTML', reply_markup: { inline_keyboard: btnLog } }).catch(err => console.error("Gagal kirim log:", err.message));
-        
-      } else {
-        bot.answerCallbackQuery(query.id, { text: "❌ Tolak: Kamu belum bergabung ke channel!", show_alert: true });
+          // --- NOTIFIKASI KE CHANNEL LOG ---
+          const textLog = `<blockquote>` +
+                          `┌ 👤 <b>PENGGUNA BARU</b>\n` +
+                          `├ 📛 Username : ${username ? '@' + username : 'Tidak ada username'}\n` +
+                          `├ 🆔 ID User : <code>${userId}</code>\n` +
+                          `└ ⏰ Waktu : ${waktuDaftar}\n\n` +
+                          `💙 Pengguna berhasil melewati Force Join.` +
+                          `</blockquote>`;
+          const btnLog = [
+            [{ text: 'Cek Profile User', callback_data: `cek_user|${userId}`, style: 'primary' }]
+          ];
+          
+          bot.sendMessage(LOG_CHANNEL, textLog, { parse_mode: 'HTML', reply_markup: { inline_keyboard: btnLog } }).catch(err => console.error("Gagal kirim log:", err.message));
+          
+        } else {
+          bot.answerCallbackQuery(query.id, { text: "❌ Tolak: Kamu belum bergabung ke channel!", show_alert: true });
+        }
+      } catch (err) {
+        bot.answerCallbackQuery(query.id, { text: "❌ Gagal mengecek channel. Pastikan bot sudah menjadi Admin di channel!", show_alert: true });
       }
       return;
     }
+
 
     // --- FITUR CEK PROFILE (Dari tombol di Channel) ---
     if (data.startsWith('cek_user|')) {
