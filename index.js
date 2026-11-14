@@ -617,7 +617,7 @@ function formatWaktuRiwayat(isoString) {
 
 // ================================================================
 
-// Tambahkan parameter userId dan username pada fungsi ini
+ 
 async function showMainMenu(chatId, userId, username, namaUser = 'Kak') {
   // 1. Ambil data dari semua database
   const dbUsers = bacaDatabase();
@@ -625,55 +625,64 @@ async function showMainMenu(chatId, userId, username, namaUser = 'Kak') {
   const dbDepo = bacaDeposit();
 
   // 2. Ambil saldo user saat ini
-  const userData = dbUsers.find(u => u.id === userId) || { saldo: 0 };
+  const userData = dbUsers.find(u => String(u.id) === String(userId)) || { saldo: 0 };
   const saldoSaatIni = userData.saldo;
 
   // 3. Kalkulasi Total Order OTP (Hanya yang statusnya 'completed')
-  const userTrx = dbTrx.filter(t => t.user_id === userId && t.status === 'completed');
+  const userTrx = dbTrx.filter(t => String(t.user_id) === String(userId) && t.status === 'completed');
   const totalTransaksi = userTrx.length;
   const totalBelanja = userTrx.reduce((acc, curr) => acc + curr.harga, 0);
 
   // 4. Kalkulasi Total Deposit (Hanya yang statusnya 'success')
-  const userDepo = dbDepo.filter(d => (d.userId === userId || d.user_id === userId) && d.status === 'success');
+  const userDepo = dbDepo.filter(d => (String(d.userId) === String(userId) || String(d.user_id) === String(userId)) && d.status === 'success');
   const totalDeposit = userDepo.reduce((acc, curr) => acc + curr.amount, 0);
 
-  // 5. Penyesuaian tampilan Username (jika user tidak mengatur username Telegram)
+  // 5. Penyesuaian tampilan Username & Nama (Aman dari karakter khusus/underscore)
+  const safeNamaUser = typeof escapeHtml === 'function' ? escapeHtml(namaUser) : namaUser;
   const displayUsername = username ? `@${username}` : 'Tidak Ada';
 
   const bannerPath = path.join(__dirname, 'foto.jpg');
-  const text = `✨ *ᴀᴜᴛᴏ ᴏʀᴅᴇʀ ᴏᴛᴘ ᴘʀᴇᴍɪᴜᴍ* ✨\n` +
+  
+  // Gunakan format HTML agar karakter garis bawah (_) pada username tidak bikin error
+  const text = `✨ <b>ᴀᴜᴛᴏ ᴏʀᴅᴇʀ ᴏᴛᴘ ᴘʀᴇᴍɪᴜᴍ</b> ✨\n` +
                `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-               `Halo *${namaUser}*! 👋\n` +
+               `Halo <b>${safeNamaUser}</b>! 👋\n` +
                `Kamu bisa order nomor virtual (Nokos) otomatis buat verifikasi WhatsApp, Telegram, dll. Pembayaran via QRIS (Otomatis 24 Jam).\n\n` +
-               `📊 *I N F O  A K U N*\n` +
+               `📊 <b>I N F O  A K U N</b>\n` +
                `👤 Username : ${displayUsername}\n` +
-               `🆔 ID Akun : \`${userId}\`\n` +
+               `🆔 ID Akun : <code>${userId}</code>\n` +
                `💰 Saldo : Rp ${formatRp(saldoSaatIni)}\n` +
                `📥 Total Deposit : Rp ${formatRp(totalDeposit)}\n` +
                `🛒 Total Belanja : Rp ${formatRp(totalBelanja)} (${totalTransaksi} TRX)\n\n` +
-               `📌 *ꜱɪʟᴀᴋᴀɴ ᴘɪʟɪʜ ᴍᴇɴᴜ ᴅɪ ʙᴀᴡᴀʜ:*`;
+               `📌 <b>ꜱɪʟᴀᴋᴀɴ ᴘɪʟɪʜ ᴍᴇɴᴜ ᴅɪ ʙᴀᴡᴀʜ:</b>`;
 
-  // ... (lanjutkan dengan variabel const keyboard = [...] dan fungsi pengiriman pesan / safeEdit milikmu)
-
-      const keyboard = [
+  const keyboard = [
     [{ text: 'ᴏʀᴅᴇʀ ɴᴏᴋᴏꜱ ꜱᴇᴋᴀʀᴀɴɢ', callback_data: 'menu_services', style: 'primary' }],
     [{ text: 'ɪꜱɪ ꜱᴀʟᴅᴏ', callback_data: 'menu_deposit', style: 'primary' }],
-    [{ text: 'ʀɪᴡᴀʏᴀᴛ ᴛʀᴀɴꜱᴀᴋꜱɪ', callback_data: 'menu_history', style: 'primary' }], // Tombol Baru
+    [{ text: 'ʀɪᴡᴀʏᴀᴛ ᴛʀᴀɴꜱᴀᴋꜱɪ', callback_data: 'menu_history', style: 'primary' }],
     [
       { text: 'ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ', url: LINK_CHANNEL },
       { text: 'ʙᴜʏ ꜱᴄʀɪᴘᴛ', url: LINK_BUY }
     ]
   ];
 
-
   try {
     const imageBuffer = fs.readFileSync(bannerPath);
-    await bot.sendPhoto(chatId, imageBuffer, { caption: text, parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+    await bot.sendPhoto(chatId, imageBuffer, { 
+      caption: text, 
+      parse_mode: 'HTML', 
+      reply_markup: { inline_keyboard: keyboard } 
+    });
   } catch (err) {
     console.error('[MENU ERROR] Gagal load foto.jpg:', err.message);
-    bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+    await bot.sendMessage(chatId, text, { 
+      parse_mode: 'HTML', 
+      reply_markup: { inline_keyboard: keyboard } 
+    }).catch(e => console.error('[MENU TEXT ERROR]', e.message));
   }
 }
+          
+             
 
 // ================= LOGIKA START & FORCE JOIN =================
 bot.onText(/^\/start/, async (msg) => {
