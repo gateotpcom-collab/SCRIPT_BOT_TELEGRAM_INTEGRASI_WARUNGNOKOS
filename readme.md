@@ -4,7 +4,7 @@
 
 **Auto Order OTP Premium · Deposit QRIS Otomatis 24 Jam**
 
-Bot Telegram terintegrasi dengan `warungnokos.web.id` & `qris.zakki.store`
+Bot Telegram terintegrasi dengan `warungnokos.web.id` & `qris.zpr0.com`
 
 ![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?style=flat-square&logo=telegram&logoColor=white)
