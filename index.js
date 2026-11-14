@@ -60,15 +60,76 @@ async function safeEdit(chatId, messageId, text, keyboard, parseMode = 'HTML') {
 }
 
 
-async function getServices() {
-  try { const { data } = await api.get('/services'); return data.success ? data.data : []; } catch (e) { return []; }
+// Variabel penyimpan data layanan sementara di RAM agar tidak delay
+let cachedServices = [];
+let lastFetchServices = 0;
+
+// Tambahkan parameter forceRefresh = false untuk mendukung tombol "Perbarui"
+async function getServices(forceRefresh = false) {
+  const now = Date.now();
+  
+  // Jika BUKAN perintah refresh dan cache di RAM belum lewat 10 menit, langsung kembalikan dari RAM
+  if (!forceRefresh && cachedServices.length > 0 && (now - lastFetchServices) < 600000) {
+    return cachedServices;
+  }
+
+  try { 
+    const { data } = await api.get('/services'); 
+    if (data.success && Array.isArray(data.data)) {
+      cachedServices = data.data;
+      lastFetchServices = now;
+      return cachedServices;
+    }
+    return cachedServices; // Kembalikan cache lama jika API pusat sedang gangguan
+  } catch (e) { 
+    return cachedServices; 
+  }
 }
+
+// Variabel cache sementara di RAM untuk Negara & Produk
+let cachedCountries = [];
+let lastFetchCountries = 0;
+const cachedProducts = {}; // Menyimpan cache berdasarkan serviceId
+
 async function getCountries() {
-  try { const { data } = await api.get('/countries'); return data.success ? data.data : []; } catch (e) { return []; }
+  const now = Date.now();
+  if (cachedCountries.length > 0 && (now - lastFetchCountries) < 600000) {
+    return cachedCountries;
+  }
+  try { 
+    const { data } = await api.get('/countries'); 
+    if (data.success && Array.isArray(data.data)) {
+      cachedCountries = data.data;
+      lastFetchCountries = now;
+      return cachedCountries;
+    }
+    return cachedCountries;
+  } catch (e) { 
+    return cachedCountries; 
+  }
 }
-async function getProducts(platformId, countryId) {
-  try { const { data } = await api.get(`/products?platform_id=${platformId}&country_id=${countryId}`); return data.success ? data.data : []; } catch (e) { return []; }
+
+// Tambahkan parameter forceRefresh = false untuk mendukung tombol "Perbarui"
+async function getProducts(platformId, countryId, forceRefresh = false) {
+  const cacheKey = `${platformId}_${countryId || 'all'}`;
+  const now = Date.now();
+
+  if (!forceRefresh && cachedProducts[cacheKey] && (now - cachedProducts[cacheKey].time) < 180000) {
+    return cachedProducts[cacheKey].data;
+  }
+
+  try { 
+    const { data } = await api.get(`/products?platform_id=${platformId}&country_id=${countryId}`); 
+    if (data.success && Array.isArray(data.data)) {
+      cachedProducts[cacheKey] = { data: data.data, time: now };
+      return data.data;
+    }
+    return cachedProducts[cacheKey]?.data || [];
+  } catch (e) { 
+    return cachedProducts[cacheKey]?.data || []; 
+  }
 }
+
 // ================= API KOMUNIKASI WARUNGNOKOS =================
 // Tambahkan parameter retry = 1 agar bot otomatis mencoba 1 kali lagi jika koneksi diputus
 async function createDeposit(nominal, retry = 1) {
@@ -157,33 +218,59 @@ async function cancelOrder(trxId) {
 }
 
 
-// Fungsi untuk mengirim notifikasi sukses ke Channel dengan privasi
+ // Fungsi untuk membuat string acak 11 karakter seperti signature SMS
+function generateRandomSmsHash() {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/';
+  let result = '';
+  for (let i = 0; i < 11; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+
+    // Fungsi untuk mengirim notifikasi sukses ke Channel dengan privasi
 function kirimLogSuksesOTP(trxData, otpCode) {
-  const waktuTrx = new Date(trxData.waktu).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+  const { LINK_BUY, CS_URL, LOG_CHANNEL } = require('./config');
+
+  // Format Waktu: "08 Nov 2026 • 18:28 WIB"
+  const d = new Date(trxData.waktu);
+  const bulan = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  const pad = (n) => n < 10 ? '0'+n : n;
+  const waktuTrx = `${pad(d.getDate())} ${bulan[d.getMonth()]} ${d.getFullYear()} • ${pad(d.getHours())}:${pad(d.getMinutes())} WIB`;
   
   // Proses penyensoran data
   const rawUsername = trxData.username ? trxData.username : String(trxData.user_id);
   const usernameDisensor = sensorUsername(rawUsername);
   const nomorDisensor = sensorNomor(trxData.nomor);
 
-  // Format pesan Blockquote HTML super rapi
-  const textLog = `<blockquote>` +
-                  `┌ 👤 <b>PEMBELI: @${usernameDisensor}</b>\n` +
-                  `├ ✅ <b>TRANSAKSI SUKSES</b>\n` +
-                  `├ 🆔 TRX : <code>${trxData.id_trx}</code>\n` +
-                  `├ 👤 ID User : <code>${trxData.user_id}</code>\n` +
-                  `├ 📦 Layanan : ${trxData.layanan}\n` +
-                  `├ 📞 Nomor : <code>${nomorDisensor}</code>\n` +
-                  `├ 💵 Harga : Rp ${formatRp(trxData.harga)}\n` +
-                  `└ ⏰ Waktu : ${waktuTrx}\n\n` +
-                  `💙 Pesanan otomatis telah diselesaikan.` +
-                  `</blockquote>`;
+  // Format kode OTP agar memiliki tanda hubung di tengah jika 6 digit (contoh: 458243 -> 458-243)
+  const otpStr = String(otpCode);
+  const otpFormatted = otpStr.length === 6 ? `${otpStr.slice(0,3)}-${otpStr.slice(3)}` : otpStr;
+  
+  const randomHash = generateRandomSmsHash();
 
-  // Tombol Salin OTP dan Tombol Ke Bot (sejajar kiri-kanan warna biru)
+  // PERBAIKAN: Gunakan &lt; dan &gt; agar Telegram tidak mengiranya sebagai tag HTML
+  const textLog = `<b>OTP ORDER RECEIVED V1!!</b> 🔐\n\n` +
+                  `Users: ${usernameDisensor}\n` +
+                  `ID: ${trxData.id_trx}\n` +
+                  `Layanan: ${trxData.layanan}\n` +
+                  `Nomor: <code>${nomorDisensor}</code>\n` +
+                  `SMS code: <code>${otpCode}</code>\n` +
+                  `Harga: Rp ${formatRp(trxData.harga)}\n` +
+                  `Tanggal: ${waktuTrx}\n\n` +
+                  `<pre>&lt;#&gt; Kode ${trxData.layanan}: ${otpFormatted}\n` +
+                  `Jangan bagikan kode ini dengan orang lain\n` +
+                  `${randomHash}</pre>`;
+
+  // Tombol disusun tanpa style tambahan (menggunakan style bawaan/transparan)
   const keyboardLog = [
     [
-      { text: `Copy OTP`, copy_text: { text: String(otpCode) }, style: 'primary' },
-      { text: `Ke Bot`, url: LINK_BUY, style: 'primary' }
+      { text: `Copy OTP`, copy_text: { text: otpStr } }
+    ],
+    [
+      { text: `Ke Bot`, url: LINK_BUY },
+      { text: `Hubungi Owner`, url: CS_URL }
     ]
   ];
 
@@ -193,6 +280,8 @@ function kirimLogSuksesOTP(trxData, otpCode) {
       reply_markup: { inline_keyboard: keyboardLog } 
   }).catch(err => console.error("Gagal kirim log OTP:", err.message));
 }
+
+   
 
 // Fungsi untuk menyensor username (misal: june7829 -> jun***29)
 function sensorUsername(username) {
@@ -209,6 +298,93 @@ function sensorNomor(nomor) {
   if (str.length <= 8) return str.substring(0, 2) + '****' + str.substring(str.length - 2);
   return str.substring(0, 4) + '****' + str.substring(str.length - 4);
 }
+
+
+
+// ================= HELPER RENDER TAMPILAN PESANAN (BULK & PAGINATION) =================
+function renderOrderView(trxIds, pageIndex) {
+  const dbTrx = bacaTrx();
+  const totalOrders = trxIds.length;
+  const safeIndex = Math.max(0, Math.min(pageIndex, totalOrders - 1));
+  const currentTrxId = trxIds[safeIndex];
+  const trxData = dbTrx.find(t => t.id_trx === currentTrxId);
+
+  if (!trxData) {
+    return { text: 'Data pesanan tidak ditemukan.', keyboard: [[{ text: 'Menu utama', callback_data: 'menu' }]] };
+  }
+
+  const headerPagination = `Total Pesanan: ${safeIndex + 1}/${totalOrders}\n\n`;
+  let bodyText = '';
+  const keyboard = [];
+
+  // Membuat baris tombol navigasi pagination sesuai posisi halaman
+  const navRow = [];
+  if (totalOrders > 1) {
+    if (safeIndex === 0) {
+      // Halaman 1 dari N
+      navRow.push({ text: 'Pesanan Selanjutnya ›', callback_data: `ord_page|${safeIndex + 1}` });
+    } else if (safeIndex === totalOrders - 1) {
+      // Halaman terakhir
+      navRow.push({ text: '‹ Pesanan Sebelumnya', callback_data: `ord_page|${safeIndex - 1}` });
+    } else {
+      // Halaman di tengah
+      navRow.push({ text: '‹ Sebelumnya', callback_data: `ord_page|${safeIndex - 1}` });
+      navRow.push({ text: 'Berikutnya ›', callback_data: `ord_page|${safeIndex + 1}` });
+    }
+  }
+
+  // STATE 1: MENUNGGU OTP (PESANAN BERHASIL)
+  if (trxData.status === 'waiting' || trxData.status === 'pending') {
+    bodyText = `✅ <b>PESANAN BERHASIL</b>\n\n` +
+               `📦 Layanan: ${trxData.layanan}\n` +
+               `📞 Nomor: <code>${trxData.nomor}</code>\n` +
+               `💵 Harga: Rp ${formatRp(trxData.harga)}\n` +
+               `🆔 TRX: <code>${trxData.id_trx}</code>\n\n` +
+               `Segera daftar pakai nomor di atas. Bot sedang mengecek OTP secara otomatis...`;
+
+    keyboard.push([{ text: 'Salin Nomor', copy_text: { text: String(trxData.nomor) } }]);
+    keyboard.push([
+      { text: 'Cek Status', callback_data: `cek_otp|${trxData.id_trx}|${safeIndex}` },
+      { text: 'Batalkan Pesanan', callback_data: `cancel|${trxData.id_trx}|${safeIndex}`, style: 'danger' }
+    ]);
+    if (navRow.length > 0) keyboard.push(navRow);
+    keyboard.push([{ text: 'Menu utama', callback_data: 'menu' }]);
+  }
+  // STATE 2: PESANAN BATAL
+  else if (trxData.status === 'canceled' || trxData.status === 'cancelled' || trxData.status === 'expired') {
+    bodyText = `❌ <b>PESANAN BATAL</b>\n\n` +
+               `📦 Layanan: ${trxData.layanan}\n` +
+               `📞 Nomor: <code>${trxData.nomor}</code>\n` +
+               `💵 Harga: Rp ${formatRp(trxData.harga)}\n` +
+               `🆔 TRX: <code>${trxData.id_trx}</code>\n\n` +
+               `Pesanan dibatalkan karena nomor tidak mendapatkan OTP dalam waktu yang ditentukan. Saldo telah dikembalikan.`;
+
+    if (navRow.length > 0) keyboard.push(navRow);
+    keyboard.push([
+      { text: '‹ Kembali ke Menu Service', callback_data: 'menu_services' },
+      { text: 'Menu utama', callback_data: 'menu' }
+    ]);
+  }
+  // STATE 3: OTP BERHASIL
+  else if (trxData.status === 'completed') {
+    bodyText = `✅ <b>OTP BERHASIL</b>\n\n` +
+               `📦 Layanan: ${trxData.layanan}\n` +
+               `📞 Nomor: <code>${trxData.nomor}</code>\n` +
+               `🔑 OTP: <code>${trxData.otp}</code>\n` +
+               `🆔 TRX: <code>${trxData.id_trx}</code>\n\n` +
+               `Silahkan masukkan kode OTP di atas untuk menyelesaikan verifikasi.`;
+
+    if (navRow.length > 0) keyboard.push(navRow);
+    keyboard.push([{ text: 'Salin OTP', copy_text: { text: String(trxData.otp) } }]);
+    keyboard.push([
+      { text: '‹ Kembali ke Menu Service', callback_data: 'menu_services' },
+      { text: 'Menu utama', callback_data: 'menu' }
+    ]);
+  }
+
+  return { text: headerPagination + bodyText, keyboard };
+}
+
 
 
 // ================= HELPERS & SETUP DATABASE TRX =================
@@ -399,7 +575,7 @@ async function prosesDepositV2(chatId, userId, nominal, hapusPesanId, username) 
 // ================= API DEPOSIT V2 (ZAKKI) =================
 async function createDepositV2(nominal) {
   try {
-    const response = await axios.post('https://qris.zakki.store/topupv2', {
+    const response = await axios.post('https://qris.zpr0.com/topupv2', {
       token: ZAKKI_TOKEN,
       nominal: Number(nominal)
     });
@@ -412,7 +588,7 @@ async function createDepositV2(nominal) {
 
 async function checkDepositStatusV2(providerTrx) {
   try {
-    const response = await axios.get(`https://qris.zakki.store/cektopup?idtopup=${providerTrx}`);
+    const response = await axios.get(`https://qris.zpr0.com/cektopup?idtopup=${providerTrx}`);
     if (response.data.code === 200 && response.data.data.status === 'SUCCESS') {
       return { success: true, status: 'success' };
     }
@@ -424,7 +600,7 @@ async function checkDepositStatusV2(providerTrx) {
 
 async function cancelDepositV2(providerTrx) {
   try {
-    const response = await axios.get(`https://qris.zakki.store/cancel?token=${ZAKKI_TOKEN}&id_transaksi=${providerTrx}`);
+    const response = await axios.get(`https://qris.zpr0.com/cancel?token=${ZAKKI_TOKEN}&id_transaksi=${providerTrx}`);
     return { success: response.data.code === 200, message: response.data.message };
   } catch (e) {
     return { success: false, message: e.response?.data?.message || e.message };
@@ -793,7 +969,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
 
 
 
-         // ================= 4. SEMUA TRANSAKSI USER (GABUNGAN) =================
+             // ================= 4. SEMUA TRANSAKSI USER (GABUNGAN) =================
     if (data.startsWith('admin_user_trx|')) {
       const [, targetId, pageStr] = data.split('|');
       const page = parseInt(pageStr) || 1;
@@ -823,27 +999,40 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const targetUser = dbUsers.find(u => String(u.id) === String(targetId));
       const dispNama = targetUser ? targetUser.nama : '-';
 
+      // Perbarui teks sesuai dengan format yang diminta
       const text = `_Semua Transaksi User_\n\n` +
                    `Nama: ${dispNama}\n` +
                    `ID User: ${targetId}\n\n` +
                    `Total Transaksi: ${totalTransaksi} Transaksi\n` +
                    `Total Belanja: Rp ${formatRp(totalBelanja)}\n` +
-                   `Total Deposit: Rp ${formatRp(totalDeposit)}`;
+                   `Total Deposit: Rp ${formatRp(totalDeposit)}\n\n` +
+                   `Silahkan pilih transaksi di bawah untuk melihat detail lengkapnya.\n` +
+                   `Setiap transaksi menampilkan jenis, status, dan nominalnya secara real-time.`;
 
       const keyboard = [];
 
       currentItems.forEach(item => {
           if (item._type === 'deposit') {
-              let style = item.status === 'success' ? 'success' : (item.status === 'pending' ? 'primary' : 'danger');
-              let btnText = `deposit • ${item.status} • ${formatRp(item.amount)}`;
-              keyboard.push([{ text: btnText, callback_data: `admin_cekdepo|${item.id_trx}|${targetId}|${page}`, style: style }]);
+              // Terjemahkan status deposit ke label yang diminta
+              let labelStatus = 'pending';
+              if (item.status === 'success') labelStatus = 'sukses';
+              else if (item.status === 'canceled' || item.status === 'expired') labelStatus = 'batal';
+
+              let btnText = `deposit • ${labelStatus} • ${formatRp(item.amount)}`;
+              // Hapus parameter style agar kembali ke tombol biasa
+              keyboard.push([{ text: btnText, callback_data: `admin_cekdepo|${item.id_trx}|${targetId}|${page}` }]);
           } else {
-              let style = item.status === 'completed' ? 'success' : (item.status === 'pending' || item.status === 'waiting' ? 'primary' : 'danger');
+              // Terjemahkan status order OTP ke label yang diminta
+              let labelStatus = 'pending';
+              if (item.status === 'completed' || item.status === 'success') labelStatus = 'sukses';
+              else if (item.status === 'canceled' || item.status === 'cancelled' || item.status === 'expired') labelStatus = 'batal';
+              
               const nomor4Digit = item.nomor ? String(item.nomor).slice(-4) : 'xxxx';
               const namaLayanan = item.layanan.substring(0, 10);
-              let btnText = `orderotp • ${item.status} • ${namaLayanan} | ${nomor4Digit}`;
-              // (Fitur detail OTP admin bisa dikembangkan nanti, sementara kita fokus ke deposit sesuai instruksi)
-              keyboard.push([{ text: btnText, callback_data: `ignore`, style: style }]); 
+              let btnText = `orderotp • ${labelStatus} • ${namaLayanan} | ${nomor4Digit}`;
+              
+              // Hapus parameter style agar kembali ke tombol biasa
+              keyboard.push([{ text: btnText, callback_data: `admin_cekotp|${item.id_trx}|${targetId}|${page}` }]); 
           }
       });
 
@@ -858,6 +1047,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       safeEdit(chatId, messageId, text, keyboard, 'Markdown');
       return;
     }
+
 
 
        // ================= 5. DETAIL DEPOSIT (ADMIN) =================
@@ -980,7 +1170,176 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       return;
     }
 
+      
+      
+          // ================= 5.5 DETAIL ORDER OTP (ADMIN - 3 LAYOUT) =================
+    if (data.startsWith('admin_cekotp|')) {
+      const [, trxId, targetId, page] = data.split('|');
+      bot.answerCallbackQuery(query.id);
 
+      const dbTrx = bacaTrx();
+      const trxData = dbTrx.find(t => t.id_trx === trxId);
+      if (!trxData) return bot.answerCallbackQuery(query.id, { text: 'Data tidak ditemukan.', show_alert: true });
+
+      const dbUsers = bacaDatabase();
+      const targetUser = dbUsers.find(u => String(u.id) === String(targetId)) || { saldo: 0, nama: 'User' };
+      const dispNama = targetUser.nama || '-';
+      
+      const waktuReq = new Date(trxData.waktu).toLocaleString('id-ID', {timeZone: 'Asia/Jakarta'});
+      const harga = formatRp(trxData.harga);
+      
+      let text = '';
+      let keyboard = [];
+
+      // 1. LAYOUT SUCCES
+      if (trxData.status === 'completed') {
+          // Asumsi: Saat pending, saldo sudah dipotong. Jadi sebelum potong = saldo saat ini + harga
+          const saldoSebelum = formatRp(targetUser.saldo + trxData.harga);
+          const saldoSesudah = formatRp(targetUser.saldo);
+          
+          text = `_Detail Transaksi Order OTP - Succes_\n\n` +
+                 `ID Transaksi: ${trxData.id_trx}\n` +
+                 `Jenis: Order OTP\n\n` +
+                 `Nama: ${dispNama}\n` +
+                 `ID User: ${targetId}\n\n` +
+                 `Layanan: ${trxData.layanan}\n` +
+                 `Nomor: ${trxData.nomor || '-'}\n` +
+                 `Kode OTP: ${trxData.otp}\n\n` +
+                 `Harga: Rp ${harga}\n` +
+                 `Status: Sukses\n\n` +
+                 `Waktu Request: ${waktuReq} WIB\n` +
+                 `Waktu Selesai: ${waktuReq} WIB\n\n` +
+                 `Saldo Sebelum: Rp ${saldoSebelum}\n` +
+                 `Saldo Sesudah: Rp ${saldoSesudah}`;
+                 
+          keyboard.push([
+              { text: 'Kembali', callback_data: `admin_user_trx|${targetId}|${page}` },
+              { text: 'Menu Admin', callback_data: 'admin_menu' }
+          ]);
+      } 
+      // 2. LAYOUT PENDING
+      else if (trxData.status === 'waiting' || trxData.status === 'pending') {
+          const saldoSebelum = formatRp(targetUser.saldo + trxData.harga);
+          
+          text = `_Detail Transaksi Order OTP - Pending_\n\n` +
+                 `ID Transaksi: ${trxData.id_trx}\n` +
+                 `Jenis: Order OTP\n\n` +
+                 `Nama: ${dispNama}\n` +
+                 `ID User: ${targetId}\n\n` +
+                 `Layanan: ${trxData.layanan}\n` +
+                 `Nomor: ${trxData.nomor || '-'}\n` +
+                 `Kode OTP: Belum Diterima\n\n` +
+                 `Harga: Rp ${harga}\n` +
+                 `Status: Menunggu OTP\n\n` +
+                 `Waktu Request: ${waktuReq} WIB\n` +
+                 `Waktu Expired: 15 Menit\n` +
+                 `Sisa Waktu: Sedang berjalan\n\n` +
+                 `Saldo Sebelum: Rp ${saldoSebelum}\n` +
+                 `Saldo Sesudah: Belum Dikembalikan\n\n` +
+                 `Pesan ini masih menunggu kode OTP masuk. Silahkan cek status secara berkala atau kirim pengingat ke user.`;
+
+          keyboard = [
+              [{ text: 'Kirim Pesan ke User', callback_data: `admin_remind_otp|${trxId}|${targetId}` }],
+              [
+                  // MENGGUNAKAN FUNGSI YANG SAMA DENGAN USER (cek_hist & batal_hist) ditambah penanda 'admin'
+                  { text: 'Cek Status', callback_data: `cek_hist|${trxId}|${page}|admin|${targetId}`, style: 'primary' },
+                  { text: 'Batalkan', callback_data: `batal_hist|${trxId}|${page}|admin|${targetId}`, style: 'danger' }
+              ],
+              [
+                  { text: 'Kembali', callback_data: `admin_user_trx|${targetId}|${page}` },
+                  { text: 'Menu Admin', callback_data: 'admin_menu' }
+              ]
+          ];
+      } 
+      // 3. LAYOUT BATALKAN
+      else {
+          const saldoSebelum = formatRp(targetUser.saldo - trxData.harga);
+          const saldoSesudah = formatRp(targetUser.saldo);
+          
+          text = `_Detail Transaksi Order OTP - Dibatalkan_\n\n` +
+                 `ID Transaksi: ${trxData.id_trx}\n` +
+                 `Jenis: Order OTP\n\n` +
+                 `Nama: ${dispNama}\n` +
+                 `ID User: ${targetId}\n\n` +
+                 `Layanan: ${trxData.layanan}\n` +
+                 `Nomor: ${trxData.nomor || '-'}\n` +
+                 `Kode OTP: Tidak Diterima\n\n` +
+                 `Harga: Rp ${harga}\n` +
+                 `Status: Dibatalkan\n\n` +
+                 `Waktu Request: ${waktuReq} WIB\n` +
+                 `Waktu Dibatalkan: ${waktuReq} WIB\n` +
+                 `Alasan: Dibatalkan oleh user / Melewati batas waktu / OTP tidak masuk\n\n` +
+                 `Saldo Sebelum: Rp ${saldoSebelum}\n` +
+                 `Saldo Sesudah: Rp ${saldoSesudah}\n\n` +
+                 `Saldo sudah dikembalikan karena transaksi dibatalkan.`;
+                 
+          keyboard.push([
+              { text: 'Kembali', callback_data: `admin_user_trx|${targetId}|${page}` },
+              { text: 'Menu Admin', callback_data: 'admin_menu' }
+          ]);
+      }
+
+      safeEdit(chatId, messageId, text, keyboard, 'Markdown');
+      return;
+    }
+
+
+          // ================= FITUR KIRIM PENGINGAT OTP KE USER =================
+    if (data.startsWith('admin_remind_otp|')) {
+      const [, trxId, targetId] = data.split('|');
+      
+      const dbTrx = bacaTrx();
+      const trxData = dbTrx.find(t => t.id_trx === trxId);
+      if (!trxData || (trxData.status !== 'pending' && trxData.status !== 'waiting')) {
+          return bot.answerCallbackQuery(query.id, { text: 'Transaksi tidak pending.', show_alert: true });
+      }
+
+      const dbUsers = bacaDatabase();
+      const targetUser = dbUsers.find(u => String(u.id) === String(targetId));
+      const waktuReq = new Date(trxData.waktu).toLocaleString('id-ID', {timeZone: 'Asia/Jakarta'});
+      
+      const pesanUser = `<i>⏳ Pesanan Order OTP Masih Pending</i>\n\n` +
+                        `Halo <b>${targetUser ? targetUser.nama : 'Kak'}</b> 👋,\n` +
+                        `Pesanan Order OTP kamu masih menunggu kode OTP masuk.\n\n` +
+                        `<b>ID Transaksi:</b> ${trxId}\n` +
+                        `<b>Layanan:</b> ${trxData.layanan}\n` +
+                        `<b>Nomor:</b> ${trxData.nomor}\n\n` +
+                        `<b>Harga:</b> Rp ${formatRp(trxData.harga)}\n` +
+                        `<b>Status:</b> Menunggu OTP\n\n` +
+                        `<b>Waktu Request:</b> ${waktuReq} WIB\n` +
+                        `<b>Waktu Expired:</b> 15 Menit\n` +
+                        `<b>Sisa Waktu:</b> Sedang berjalan\n\n` +
+                        `<pre>💡 Mohon tunggu sebentar, kode OTP akan otomatis masuk jika sudah tersedia. Jika sudah melewati batas waktu, pesanan akan otomatis dibatalkan dan saldo dikembalikan.</pre>`;
+      
+      // Ambil CS_URL dari config untuk tombol Laporan Kendala
+      const { CS_URL } = require('./config');
+
+      // Penyesuaian tata letak tombol sesuai permintaan
+      const keyboardUser = [
+          [{ text: 'Salin Nomor', copy_text: { text: String(trxData.nomor) } }],
+          [
+              { text: 'Cek Status', callback_data: `cek_hist|${trxId}|1`, style: 'primary' },
+              { text: 'Batalkan', callback_data: `batal_hist|${trxId}|1`, style: 'danger' }
+          ],
+          [
+              { text: 'Menu Utama', callback_data: 'menu' },
+              { text: 'Lapor Kendala', url: CS_URL } // Mengarah ke owner/admin
+          ]
+      ];
+
+      // parse_mode diubah menjadi 'HTML' agar tag <b> dan <i> terbaca dengan baik
+      bot.sendMessage(targetId, pesanUser, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboardUser } })
+         .then(() => {
+             bot.answerCallbackQuery(query.id, { text: '✅ Pengingat berhasil dikirim ke user!', show_alert: true });
+         })
+         .catch(() => {
+             bot.answerCallbackQuery(query.id, { text: '❌ Gagal mengirim pesan. Bot mungkin diblokir user.', show_alert: true });
+         });
+      return;
+    }
+
+
+      
       
         // ================= 1. MENU UTAMA RIWAYAT =================
     if (data === 'menu_history') {
@@ -1108,7 +1467,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       // Susun tombol 6 baris ke bawah (1 kolom)
       currentItems.forEach(t => {
           let statusLabel = 'pending';
-          if (t.status === 'completed') statusLabel = 'completed';
+          if (t.status === 'completed') statusLabel = 'sukses';
           else if (t.status === 'canceled' || t.status === 'cancelled' || t.status === 'expired') statusLabel = 'batal';
           
           const nomor4Digit = t.nomor ? String(t.nomor).slice(-4) : 'xxxx';
@@ -1241,9 +1600,10 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
     }
 
 
-          // ================= 6. CEK STATUS (DARI RIWAYAT) =================
+              // ================= CEK STATUS OTP (UNIVERSAL: USER & ADMIN) =================
     if (data.startsWith('cek_hist|')) {
-      const [, trxId, page] = data.split('|');
+      // Split mendeteksi apakah parameter ke-4 adalah 'admin'
+      const [, trxId, page, role, targetId] = data.split('|');
       let dbTrx = bacaTrx();
       let trxData = dbTrx.find(t => t.id_trx === trxId);
 
@@ -1253,23 +1613,33 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const res = await checkOrderStatus(trxData.provider_trx);
 
       if (res.status === 'completed' && res.otp_code) {
-          // Jika sukses masuk, simpan dan langsung edit ke tampilan layout COMPLETED
           trxData.status = 'completed';
           trxData.otp = res.otp_code;
+          
+          // MENCEGAH DOUBLE LOG DAN MEMPERBAIKI NAMA FUNGSI
+          if (!trxData.log_sent) {
+              trxData.log_sent = true;
+              kirimLogSuksesOTP(trxData, res.otp_code); // Tadi namanya salah dan parameternya kurang pas
+          }
           simpanTrx(dbTrx);
           
-          // Memanggil ulang antarmuka detail OTP (akan otomatis masuk ke layout Completed)
-          query.data = `detail_otp|${trxId}|${page}`; 
+          // Arahkan kembali render UI sesuai siapa yang menekan tombol
+          if (role === 'admin') {
+              query.data = `admin_cekotp|${trxId}|${targetId}|${page}`;
+          } else {
+              query.data = `detail_otp|${trxId}|${page}`; 
+          }
           bot.emit('callback_query', query);
       } else {
-          bot.answerCallbackQuery(query.id, { text: `⏳ OTP Belum masuk. Status pusat: ${res.status || 'waiting'}`, show_alert: true });
+          bot.answerCallbackQuery(query.id, { text: `OTP belum masuk. Status pusat: ${res.status || 'waiting'}`, show_alert: true });
       }
       return;
     }
 
-    // ================= 7. BATALKAN PESANAN (DARI RIWAYAT) =================
+
+    // ================= BATALKAN PESANAN (UNIVERSAL: USER & ADMIN) =================
     if (data.startsWith('batal_hist|')) {
-      const [, trxId, page] = data.split('|');
+      const [, trxId, page, role, targetId] = data.split('|');
       let dbTrx = bacaTrx();
       let trxIndex = dbTrx.findIndex(t => t.id_trx === trxId);
       let trxData = dbTrx[trxIndex];
@@ -1281,7 +1651,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const timeDiff = Date.now() - orderTime;
       if (timeDiff < 120000) {
           const sisa = Math.ceil((120000 - timeDiff) / 1000);
-          return bot.answerCallbackQuery(query.id, { text: `❌ Tunggu ${sisa} detik lagi untuk membatalkan pesanan.`, show_alert: true });
+          return bot.answerCallbackQuery(query.id, { text: `Tunggu ${sisa} detik lagi untuk membatalkan pesanan.`, show_alert: true });
       }
 
       bot.answerCallbackQuery(query.id, { text: 'Membatalkan pesanan...' });
@@ -1290,19 +1660,49 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       if (res.success || (res.message && res.message.toLowerCase().includes('batal'))) {
           // Kembalikan Saldo User
           let dbUsers = bacaDatabase();
-          let userIndex = dbUsers.findIndex(u => u.id === trxData.user_id);
-          dbUsers[userIndex].saldo += trxData.harga;
-          simpanDatabase(dbUsers);
+          let realUserId = role === 'admin' ? targetId : trxData.user_id;
+          let userIndex = dbUsers.findIndex(u => String(u.id) === String(realUserId));
+          
+          if (userIndex !== -1) {
+              dbUsers[userIndex].saldo += trxData.harga;
+              simpanDatabase(dbUsers);
+          }
 
           // Update Status ke Canceled
           trxData.status = 'canceled';
           simpanTrx(dbTrx);
+          
+          const waktuReq = new Date(trxData.waktu).toLocaleString('id-ID', {timeZone: 'Asia/Jakarta'});
 
-          // Memanggil ulang antarmuka detail (otomatis beralih ke layout Canceled)
-          query.data = `detail_otp|${trxId}|${page}`; 
+          // Kirim pesan otomatis ke user jika dibatalkan (Oleh sistem / Admin)
+          const pesanBatal = `_Order OTP Dibatalkan_\n\n` +
+                             `Halo ${dbUsers[userIndex]?.nama || 'Kak'},\n` +
+                             `Pesanan Order OTP kamu telah dibatalkan.\n\n` +
+                             `ID Transaksi: ${trxId}\n` +
+                             `Layanan: ${trxData.layanan}\n` +
+                             `Nomor: ${trxData.nomor}\n\n` +
+                             `Harga: Rp ${formatRp(trxData.harga)}\n` +
+                             `Saldo Dikembalikan: Rp ${formatRp(trxData.harga)}\n\n` +
+                             `Waktu Request: ${waktuReq} WIB\n` +
+                             `Waktu Dibatalkan: ${new Date().toLocaleString('id-ID', {timeZone: 'Asia/Jakarta'})} WIB\n\n` +
+                             `Saldo kamu sudah dikembalikan dan bisa digunakan untuk order lagi.`;
+                             
+          const keyboardBatal = [
+              [{ text: 'Order OTP Lagi', callback_data: 'menu_services', style: 'primary' }],
+              [{ text: 'Menu Utama', callback_data: 'menu' }]
+          ];
+          
+          bot.sendMessage(trxData.user_id, pesanBatal, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboardBatal } }).catch(()=>{});
+
+          // Arahkan kembali render UI 
+          if (role === 'admin') {
+              query.data = `admin_cekotp|${trxId}|${targetId}|${page}`;
+          } else {
+              query.data = `detail_otp|${trxId}|${page}`; 
+          }
           bot.emit('callback_query', query);
       } else {
-          bot.answerCallbackQuery(query.id, { text: `❌ Gagal membatalkan pesanan dari pusat.`, show_alert: true });
+          bot.answerCallbackQuery(query.id, { text: `Gagal membatalkan pesanan dari pusat.`, show_alert: true });
       }
       return;
     }
@@ -1557,7 +1957,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const text = `<blockquote>` +
                    `┌ ⚙️ <b>PENGATURAN DEPOSIT</b>\n` +
                    `├ <b>Deposit V1 :</b> Integrasi WarungNokos\n` +
-                   `└ <b>Deposit V2 :</b> Integrasi qris.zakki.store\n\n` +
+                   `└ <b>Deposit V2 :</b> Integrasi https://qris.zpr0.com\n\n` +
                    `┌ 📌 <b>PETUNJUK</b>\n` +
                    `└ Klik tombol di bawah untuk mengubah status Aktif / Nonaktif.\n\n` +
                    `💙 Perubahan akan langsung diterapkan.` +
@@ -1597,7 +1997,7 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const text = `<blockquote>` +
                    `┌ ⚙️ <b>PENGATURAN DEPOSIT</b>\n` +
                    `├ <b>Deposit V1 :</b> Integrasi WarungNokos\n` +
-                   `└ <b>Deposit V2 :</b> Integrasi qris.zakki.store\n\n` +
+                   `└ <b>Deposit V2 :</b> Integrasi https://qris.zpr0.com\n\n` +
                    `┌ 📌 <b>PETUNJUK</b>\n` +
                    `└ Klik tombol di bawah untuk mengubah status Aktif / Nonaktif.\n\n` +
                    `💙 Perubahan akan langsung diterapkan.` +
@@ -1616,207 +2016,454 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
 
  
       
-    // ================= 1. MENU LAYANAN =================
-    if (data === 'menu_services' || data.startsWith('svc_page|')) {
-      const page = data.includes('|') ? parseInt(data.split('|')[1]) : 1;
-      bot.answerCallbackQuery(query.id, { text: 'Memuat layanan...' });
-      const services = await getServices();
-      if (services.length === 0) return bot.answerCallbackQuery(query.id, { text: 'Gagal ambil layanan', show_alert: true });
 
-      const limit = 10;
+          // ================= 1. MENU LAYANAN (ANTI DELAY, PRIORITY SORT & REFRESH) =================
+    if (data === 'menu_services' || data.startsWith('svc_page|')) {
+      // Memecah data callback (contoh: 'svc_page|2|refresh')
+      const parts = data.split('|');
+      const page = parts.length > 1 ? parseInt(parts[1]) : 1;
+      const isRefresh = parts[2] === 'refresh';
+      
+      // Berikan respon notifikasi kecil di atas layar jika user menekan tombol Perbarui
+      if (isRefresh) {
+        bot.answerCallbackQuery(query.id, { text: 'Memperbarui daftar layanan...' });
+      } else {
+        bot.answerCallbackQuery(query.id);
+      }
+
+      // Ambil layanan (jika isRefresh true, paksa ambil ulang dari server API)
+      const rawServices = await getServices(isRefresh);
+      if (rawServices.length === 0) {
+          return bot.answerCallbackQuery(query.id, { text: 'Gagal mengambil daftar layanan dari server.', show_alert: true });
+      }
+
+      // Daftar layanan populer yang wajib diletakkan di paling atas (urutan prioritas)
+      const priorityKeywords = ['whatsapp', 'facebook', 'shopee', 'shoppe', 'instagram', 'tiktok', 'grab', 'telegram'];
+      
+      const priorityList = [];
+      const normalList = [];
+
+      // Pisahkan layanan populer dan layanan biasa
+      rawServices.forEach(s => {
+          const cleanLower = bersihkanEmoji(s.name).toLowerCase();
+          const matchIndex = priorityKeywords.findIndex(kw => cleanLower === kw || cleanLower.startsWith(kw + ' '));
+          
+          if (matchIndex !== -1) {
+              priorityList.push({ ...s, _rank: matchIndex });
+          } else {
+              normalList.push(s);
+          }
+      });
+
+      // Urutkan layanan populer sesuai urutan prioritas
+      priorityList.sort((a, b) => a._rank - b._rank);
+
+      // Gabungkan kembali: Populer di atas, sisanya di bawah
+      const services = [...priorityList, ...normalList];
+
+      // Pengaturan Grid 2 kolom x 4 baris = 8 tombol per halaman
+      const limit = 8;
       const totalPages = Math.ceil(services.length / limit);
-      const offset = (page - 1) * limit;
+      const safePage = page > totalPages ? totalPages : page;
+      const offset = (safePage - 1) * limit;
       const currentServices = services.slice(offset, offset + limit);
 
+      // 1. Bagian Atas: Grid layanan 2 kolom
       const buttons = currentServices.map(s => {
           const cleanName = bersihkanEmoji(s.name);
-          return { text: cleanName, callback_data: `svc|${s.id}|${cleanName.substring(0,10)}|1`, style: 'primary' };
+          return { text: cleanName, callback_data: `svc|${s.id}|${cleanName.substring(0,10)}|1` };
       });
       const keyboard = chunkArray(buttons, 2);
 
+      // 2. Baris Navigasi Halaman
       const navButtons = [];
-      if (page > 1) navButtons.push({ text: 'Sebelumnya', callback_data: `svc_page|${page - 1}`, style: 'primary' });
-      navButtons.push({ text: `${page}/${totalPages}`, callback_data: 'ignore', style: 'primary' });
-      if (page < totalPages) navButtons.push({ text: 'Selanjutnya', callback_data: `svc_page|${page + 1}`, style: 'primary' });
-      
-      keyboard.push(navButtons);
-      keyboard.push([{ text: 'Kembali', callback_data: 'menu', style: 'danger' }]);
+      if (safePage > 1) {
+          navButtons.push({ text: '‹ Sebelumnya', callback_data: `svc_page|${safePage - 1}` });
+      }
+      if (safePage < totalPages) {
+          navButtons.push({ text: 'Berikutnya ›', callback_data: `svc_page|${safePage + 1}` });
+      }
+      if (navButtons.length > 0) {
+          keyboard.push(navButtons);
+      }
 
-      const text = `<blockquote>` +
-                   `┌ 👋 <b>HALO, ${senderName.toUpperCase()}</b>\n` +
-                   `└ 💰 Saldo: Rp ${formatRp(saldoSaatIni)}\n\n` +
-                   `┌ 📊 <b>INFORMASI LAYANAN</b>\n` +
-                   `├ 🛒 Total Layanan : ${services.length}\n` +
-                   `└ 📑 Halaman : ${page}/${totalPages}\n\n` +
-                   `┌ 📌 <b>PETUNJUK</b>\n` +
-                   `├ Pilih aplikasi dari daftar di bawah.\n` +
-                   `└ Gunakan tombol navigasi untuk berpindah.\n\n` +
-                   `💙 Silakan pilih layanan untuk memulai transaksi.` +
-                   `</blockquote>`;
-      safeEdit(chatId, messageId, text, keyboard, 'HTML');
+      // 3. Baris Tombol Perbarui (Full Width)
+      keyboard.push([
+          { text: '↻ Perbarui', callback_data: `svc_page|${safePage}|refresh` }
+      ]);
+
+      // 4. Tombol Paling Bawah: Menu Utama (Full Width)
+      keyboard.push([
+          { text: 'Menu utama', callback_data: 'menu' }
+      ]);
+
+      // Format Teks Biasa (Tanpa Blockquote)
+      const text = `Beli nomor • 1/4\n` +
+                   `Pilih layanan\n\n` +
+                   `${services.length} layanan • halaman ${safePage}/${totalPages}\n\n` +
+                   `Pilih layanan, atau ketik namanya untuk mencari.`;
+
+      // Transisi mulus dari Foto (Menu Utama) atau Teks (Antar Halaman)
+      if (query.message.photo) {
+          await bot.deleteMessage(chatId, messageId).catch(() => {});
+          await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: keyboard } });
+      } else {
+          await bot.editMessageText(text, {
+              chat_id: chatId,
+              message_id: messageId,
+              reply_markup: { inline_keyboard: keyboard }
+          }).catch(() => {});
+      }
       return;
     }
 
-    // ================= 2. MENU NEGARA =================
+     
+                   
+   
+      
+          // ================= 2. MENU NEGARA (HARGA TERMURAH & 1 KOLOM) =================
     if (data.startsWith('svc|')) {
-      const [, serviceId, serviceName, pageStr] = data.split('|');
-      const page = parseInt(pageStr) || 1;
-      bot.answerCallbackQuery(query.id, { text: 'Memuat negara dan stok...' });
+      // Deteksi apakah ada parameter tambahan '|refresh' dari tombol Perbarui
+      const parts = data.split('|');
+      const serviceId = parts[1];
+      const serviceName = parts[2];
+      const page = parseInt(parts[3]) || 1;
+      const isRefresh = parts[4] === 'refresh';
 
-      const allProducts = await getProducts(serviceId, '');
-      const stockPerCountry = {};
+      if (isRefresh) {
+        bot.answerCallbackQuery(query.id, { text: 'Memperbarui harga terbaru...' });
+      } else {
+        bot.answerCallbackQuery(query.id);
+      }
+
+      // Ambil produk (jika isRefresh true, paksa ambil data baru dari API)
+      const allProducts = await getProducts(serviceId, '', isRefresh);
+      
+      // Hitung stok dan cari harga termurah per negara
+      const countryStats = {};
+      const feeMultiplier = parseInt(FEE_PERCENT || 0) / 100;
+
       allProducts.forEach(p => {
-          if (!stockPerCountry[p.country_id]) stockPerCountry[p.country_id] = 0;
-          stockPerCountry[p.country_id] += p.available;
+          if (p.available > 0) {
+              const finalPrice = Math.ceil(p.price + (p.price * feeMultiplier));
+              
+              if (!countryStats[p.country_id]) {
+                  countryStats[p.country_id] = { stock: 0, minPrice: finalPrice };
+              }
+              countryStats[p.country_id].stock += p.available;
+              
+              // Simpan harga yang paling murah
+              if (finalPrice < countryStats[p.country_id].minPrice) {
+                  countryStats[p.country_id].minPrice = finalPrice;
+              }
+          }
       });
 
       const allCountries = await getCountries();
-      const availableCountries = allCountries.filter(c => stockPerCountry[c.id] > 0);
-      if (availableCountries.length === 0) return bot.answerCallbackQuery(query.id, { text: 'Stok kosong untuk layanan ini', show_alert: true });
+      
+      // Filter hanya negara yang memiliki stok, lalu sisipkan data minPrice
+      let availableCountries = allCountries
+          .filter(c => countryStats[c.id] && countryStats[c.id].stock > 0)
+          .map(c => ({
+              ...c,
+              minPrice: countryStats[c.id].minPrice,
+              totalStock: countryStats[c.id].stock
+          }));
 
-      const limit = 10;
+      if (availableCountries.length === 0) {
+          return bot.answerCallbackQuery(query.id, { text: 'Stok kosong untuk layanan ini.', show_alert: true });
+      }
+
+      // Urutkan negara dari harga termurah ke termahal
+      availableCountries.sort((a, b) => a.minPrice - b.minPrice);
+
+      // Pagination: 8 negara per halaman
+      const limit = 8;
       const totalPages = Math.ceil(availableCountries.length / limit);
-      const offset = (page - 1) * limit;
+      const safePage = page > totalPages ? totalPages : page;
+      const offset = (safePage - 1) * limit;
       const currentCountries = availableCountries.slice(offset, offset + limit);
 
-      const buttons = currentCountries.map(c => {
-          return { text: `${c.emoji} ${c.name} (${stockPerCountry[c.id]})`, callback_data: `cty|${serviceId}|${serviceName}|${c.id}|${c.name.substring(0,10)}`, style: 'success' };
-      });
-      const keyboard = chunkArray(buttons, 2);
+      const keyboard = [];
 
+      // 1. Bagian Atas: List negara 1 kolom full width (tanpa emoji & style biasa)
+      currentCountries.forEach(c => {
+          const cleanCountryName = bersihkanEmoji(c.name);
+          const btnText = `${cleanCountryName} • mulai Rp ${formatRp(c.minPrice)}`;
+          keyboard.push([
+              { text: btnText, callback_data: `cty|${serviceId}|${serviceName}|${c.id}|${cleanCountryName.substring(0, 12)}` }
+          ]);
+      });
+
+      // 2. Baris Navigasi Halaman
       const navButtons = [];
-      if (page > 1) navButtons.push({ text: 'Sebelumnya', callback_data: `svc|${serviceId}|${serviceName}|${page - 1}`, style: 'primary' });
-      navButtons.push({ text: `${page}/${totalPages}`, callback_data: 'ignore', style: 'primary' });
-      if (page < totalPages) navButtons.push({ text: 'Selanjutnya', callback_data: `svc|${serviceId}|${serviceName}|${page + 1}`, style: 'primary' });
-      
-      keyboard.push(navButtons);
-      keyboard.push([{ text: 'Kembali', callback_data: 'menu_services', style: 'danger' }]);
+      if (safePage > 1) {
+          navButtons.push({ text: '‹ Sebelumnya', callback_data: `svc|${serviceId}|${serviceName}|${safePage - 1}` });
+      }
+      if (safePage < totalPages) {
+          navButtons.push({ text: 'Berikutnya ›', callback_data: `svc|${serviceId}|${serviceName}|${safePage + 1}` });
+      }
+      if (navButtons.length > 0) {
+          keyboard.push(navButtons);
+      }
 
-      const text = `<blockquote>` +
-                   `┌ 📊 <b>INFORMASI NEGARA</b>\n` +
-                   `├ 📱 Layanan : ${serviceName}\n` +
-                   `├ 🌍 Total Negara : ${availableCountries.length}\n` +
-                   `└ 📑 Halaman : ${page}/${totalPages}\n\n` +
-                   `┌ 📌 <b>PETUNJUK</b>\n` +
-                   `├ Pilih negara dari daftar di bawah.\n` +
-                   `└ Setiap negara memiliki stok berbeda.\n\n` +
-                   `💙 Silakan pilih negara untuk melihat server.` +
-                   `</blockquote>`;
-      await bot.deleteMessage(chatId, messageId).catch(() => {});
-      bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      return;
-    }
+      // 3. Baris Pencarian & Perbarui
+      keyboard.push([
+          { text: 'Cari negara', callback_data: `search_cty|${serviceId}|${serviceName}` },
+          { text: '↻ Perbarui', callback_data: `svc|${serviceId}|${serviceName}|${safePage}|refresh` }
+      ]);
 
-    // ================= 3. MENU SERVER (STOK) =================
-    if (data.startsWith('cty|')) {
-      const [, serviceId, serviceName, countryId, countryName] = data.split('|');
-      bot.answerCallbackQuery(query.id, { text: 'Memuat server...' });
-      
-      const allProducts = await getProducts(serviceId, countryId);
-      const availableProducts = allProducts.filter(p => p.available > 0);
-      if (availableProducts.length === 0) return bot.answerCallbackQuery(query.id, { text: 'Stok kosong di negara ini', show_alert: true });
+      // 4. Baris Panduan Layanan (Full Width)
+      keyboard.push([
+          { text: 'Panduan layanan ↗', callback_data: `guide_svc|${serviceId}|${serviceName}|${safePage}` }
+      ]);
 
-      const totalStock = availableProducts.reduce((acc, p) => acc + p.available, 0);
-      const products = availableProducts.slice(0, 10); 
+      // 5. Baris Kembali & Menu Utama
+      keyboard.push([
+          { text: '‹ Kembali', callback_data: 'menu_services' },
+          { text: 'Menu utama', callback_data: 'menu' }
+      ]);
 
-      const keyboard = products.map(p => {
-          const finalPrice = Math.ceil(p.price + (p.price * (parseInt(FEE_PERCENT) / 100)));
-          return [{ text: `${p.name} | Stok: ${p.available} | Rp ${formatRp(finalPrice)}`, callback_data: `buy|${p.id}|${serviceId}|${countryId}|${finalPrice}|${serviceName}|${countryName}`, style: 'success' }];
-      });
-      keyboard.push([{ text: 'Kembali', callback_data: `svc|${serviceId}|${serviceName}|1`, style: 'danger' }]);
+      // Format Teks Biasa (Tanpa Blockquote)
+      const text = `Beli nomor • 2/4\n` +
+                   `Pilih negara\n\n` +
+                   `Layanan: ${serviceName}\n` +
+                   `${availableCountries.length} negara tersedia • halaman ${safePage}/${totalPages}\n\n` +
+                   `Diurutkan dari harga termurah. Pilih negara untuk melihat harga terbaru.`;
 
-      const text = `<blockquote>` +
-                   `┌ 📊 <b>INFORMASI SERVER</b>\n` +
-                   `├ 🌍 Negara : ${countryName}\n` +
-                   `└ 📦 Total Stok : ${totalStock}\n\n` +
-                   `┌ 📌 <b>PETUNJUK</b>\n` +
-                   `├ Klik server di bawah untuk membeli.\n` +
-                   `└ Saldo otomatis terpotong jika stok ada.\n\n` +
-                   `💙 Silakan pilih server untuk order OTP.` +
-                   `</blockquote>`;
+      // Gunakan safeEdit agar transisi dari menu layanan sangat halus tanpa kedip
       safeEdit(chatId, messageId, text, keyboard, 'HTML');
       return;
     }
 
-    // ================= 4. PEMBELIAN (BUY) =================
-    if (data.startsWith('buy|')) {
-      const [, productId, appId, countryId, priceStr, serviceName, countryName] = data.split('|');
-      const finalPrice = Number(priceStr);
+      
+      
+         // ================= 3. MENU SERVER / PILIH HARGA (3/4 + BULK QTY) =================
+    if (data.startsWith('cty|')) {
+      // Format callback_data: cty|serviceId|serviceName|countryId|countryName|qty|action
+      const parts = data.split('|');
+      const serviceId = parts[1];
+      const serviceName = parts[2];
+      const countryId = parts[3];
+      const countryName = parts[4];
+      let qty = parseInt(parts[5]) || 1;
+      const action = parts[6] || '';
 
-      if (saldoSaatIni < finalPrice) {
-          const alertText = `Saldo anda tidak cukup\n\nTransaksi: ${serviceName} | ${countryName}\nSaldo saat ini: ${formatRp(saldoSaatIni)}\nHarga: ${formatRp(finalPrice)}\nKurang: ${formatRp(finalPrice - saldoSaatIni)}\n\nSilahkan deposit terlebih dahulu`;
+      // Logika pengaturan jumlah order (+ / -)
+      if (action === 'plus') {
+          qty += 1;
+          bot.answerCallbackQuery(query.id);
+      } else if (action === 'minus') {
+          if (qty <= 1) {
+              return bot.answerCallbackQuery(query.id, { text: 'Minimal order adalah 1 nomor.', show_alert: true });
+          }
+          qty -= 1;
+          bot.answerCallbackQuery(query.id);
+      } else if (action === 'refresh') {
+          bot.answerCallbackQuery(query.id, { text: 'Memperbarui harga dan stok...' });
+      } else {
+          bot.answerCallbackQuery(query.id);
+      }
+
+      // Ambil produk (jika action === 'refresh', paksa ambil data baru dari API pusat)
+      const isRefresh = action === 'refresh';
+      const allProducts = await getProducts(serviceId, countryId, isRefresh);
+      const availableProducts = allProducts.filter(p => p.available > 0);
+      
+      if (availableProducts.length === 0) {
+          return bot.answerCallbackQuery(query.id, { text: 'Stok kosong di negara ini.', show_alert: true });
+      }
+
+      // Kalkulasi total stok dan harga akhir setiap produk
+      const totalStock = availableProducts.reduce((acc, p) => acc + p.available, 0);
+      const feeMultiplier = parseInt(FEE_PERCENT || 0) / 100;
+
+      const productsWithPrice = availableProducts.map(p => ({
+          ...p,
+          finalPrice: Math.ceil(p.price + (p.price * feeMultiplier))
+      }));
+
+      // Urutkan dari harga termurah, lalu ambil maksimal 6 pilihan harga
+      productsWithPrice.sort((a, b) => a.finalPrice - b.finalPrice);
+      const products = productsWithPrice.slice(0, 6);
+
+      // Potong nama layanan & negara maksimal 10 karakter agar callback_data aman (< 64 bytes)
+      const shortSvc = serviceName.substring(0, 10);
+      const shortCty = countryName.substring(0, 10);
+
+      const keyboard = [];
+
+      // 1. Bagian Atas: List harga 1 kolom full width (maksimal 6 button, style biasa)
+      products.forEach(p => {
+          const btnText = `Rp ${formatRp(p.finalPrice)} • stok ${p.available}`;
+          // Menyisipkan 'qty' di akhir callback_data buy| untuk tahap konfirmasi 4/4 nanti
+          keyboard.push([
+              { text: btnText, callback_data: `buy|${p.id}|${serviceId}|${countryId}|${p.finalPrice}|${shortSvc}|${shortCty}|${qty}` }
+          ]);
+      });
+
+      // 2. Baris Atur Jumlah Order (+ di kiri, - di kanan)
+      keyboard.push([
+          { text: '+', callback_data: `cty|${serviceId}|${shortSvc}|${countryId}|${shortCty}|${qty}|plus` },
+          { text: '-', callback_data: `cty|${serviceId}|${shortSvc}|${countryId}|${shortCty}|${qty}|minus` }
+      ]);
+
+      // 3. Baris Display Jumlah Order (Full Width, hanya info/display)
+      keyboard.push([
+          { text: `Jumlah Order: ${qty}`, callback_data: 'ignore' }
+      ]);
+
+      // 4. Baris Perbarui & Menu Utama
+      keyboard.push([
+          { text: '↻ Perbarui', callback_data: `cty|${serviceId}|${shortSvc}|${countryId}|${shortCty}|${qty}|refresh` },
+          { text: 'Menu utama', callback_data: 'menu' }
+      ]);
+
+      // 5. Baris Paling Bawah: Kembali ke List Negara
+      keyboard.push([
+          { text: '‹ Kembali', callback_data: `svc|${serviceId}|${shortSvc}|1` }
+      ]);
+
+      // Format Teks Biasa (Tanpa Blockquote)
+      const text = `Beli nomor • 3/4\n` +
+                   `Pilih harga\n\n` +
+                   `${serviceName} • ${countryName}\n` +
+                   `${products.length} pilihan harga\n\n` +
+                   `Saldo Anda: Rp ${formatRp(saldoSaatIni)}\n` +
+                   `Total Stock: ${formatRp(totalStock)}\n\n` +
+                   `Harga untuk 1 nomor. Saldo belum dipotong; periksa ringkasan sebelum konfirmasi.`;
+
+      // Gunakan safeEdit agar pergantian angka (+) / (-) berlangsung sangat halus tanpa kedip
+      safeEdit(chatId, messageId, text, keyboard, 'HTML');
+      return;
+    }
+
+      
+      
+       
+
+        // ================= 4. PEMBELIAN (BUY - MENDUKUNG BULK ORDER) =================
+    if (data.startsWith('buy|')) {
+      const parts = data.split('|');
+      const productId = parts[1];
+      const appId = parts[2];
+      const countryId = parts[3];
+      const unitPrice = Number(parts[4]);
+      const serviceName = parts[5];
+      const countryName = parts[6];
+      const qty = parseInt(parts[7]) || 1;
+
+      const totalHarga = unitPrice * qty;
+
+      if (saldoSaatIni < totalHarga) {
+          const alertText = `Saldo anda tidak cukup\n\nTransaksi: ${serviceName} (${qty}x) | ${countryName}\nSaldo saat ini: Rp ${formatRp(saldoSaatIni)}\nTotal Harga: Rp ${formatRp(totalHarga)}\nKurang: Rp ${formatRp(totalHarga - saldoSaatIni)}\n\nSilahkan deposit terlebih dahulu`;
           return bot.answerCallbackQuery(query.id, { text: alertText, show_alert: true });
       }
 
-      bot.answerCallbackQuery(query.id, { text: 'Memproses pesanan...' });
+      bot.answerCallbackQuery(query.id, { text: `Memproses ${qty} pesanan...` });
 
-      // Potong saldo sementara
+      // Potong saldo total sementara
       let userIndex = dbUsers.findIndex(u => u.id === userId);
-      dbUsers[userIndex].saldo -= finalPrice;
+      dbUsers[userIndex].saldo -= totalHarga;
       simpanDatabase(dbUsers);
 
-      const resOrder = await createOrder(productId, appId, countryId, serviceName);
+      const createdTrxIds = [];
+      const createdOrdersData = [];
+      const telegramUsername = query.from.username || '';
+      let dbTrx = bacaTrx();
 
-      if (!resOrder.success) {
-          // Refund jika gagal
+      // Looping pemesanan sesuai jumlah qty
+      for (let i = 0; i < qty; i++) {
+          const resOrder = await createOrder(productId, appId, countryId, serviceName);
+          if (resOrder.success && resOrder.data) {
+              const myTrx = generateTrxId();
+              const newOrder = {
+                  id_trx: myTrx,
+                  provider_trx: resOrder.data.trxId,
+                  user_id: userId,
+                  username: telegramUsername,
+                  layanan: serviceName,
+                  harga: unitPrice,
+                  nomor: resOrder.data.phoneNumber,
+                  otp: null,
+                  waktu: new Date().toISOString(),
+                  status: 'waiting'
+              };
+              dbTrx.push(newOrder);
+              createdTrxIds.push(myTrx);
+              createdOrdersData.push(newOrder);
+          } else {
+              break; // Hentikan loop jika stok tiba-tiba habis di tengah jalan
+          }
+      }
+
+      // Jika semua pesanan gagal dibuat
+      if (createdTrxIds.length === 0) {
           dbUsers = bacaDatabase();
-          dbUsers[userIndex].saldo += finalPrice;
+          userIndex = dbUsers.findIndex(u => u.id === userId);
+          dbUsers[userIndex].saldo += totalHarga;
           simpanDatabase(dbUsers);
-          const errMsg = await bot.sendMessage(chatId, `❌ <b>Gagal:</b> Stok habis atau server gangguan. Silakan coba server/harga lain.`, { parse_mode: 'HTML' });
+          const errMsg = await bot.sendMessage(chatId, `❌ <b>Gagal:</b> Stok habis atau server gangguan. Saldo telah dikembalikan.`, { parse_mode: 'HTML' });
           setTimeout(() => bot.deleteMessage(chatId, errMsg.message_id).catch(()=>{}), 5000);
           return;
       }
 
-      const myTrx = generateTrxId();
-      const providerTrx = resOrder.data.trxId; 
-      const phoneNumber = resOrder.data.phoneNumber;
-      
-      let dbTrx = bacaTrx();
-            // Ambil username telegram pengguna (jika tidak ada, kosongkan)
-      const telegramUsername = query.from.username || '';
-      
-      dbTrx.push({
-          id_trx: myTrx, 
-          provider_trx: providerTrx, 
-          user_id: userId, 
-          username: telegramUsername, // <-- PROPERTI BARU YANG DITAMBAHKAN
-          layanan: serviceName,
-          harga: finalPrice, 
-          nomor: phoneNumber, 
-          otp: null, 
-          waktu: new Date().toISOString(), 
-          status: 'waiting'
-      });
+      // Refund sebagian jika yang berhasil dibuat lebih sedikit dari qty yang diminta
+      if (createdTrxIds.length < qty) {
+          const gagalQty = qty - createdTrxIds.length;
+          const refundAmount = gagalQty * unitPrice;
+          dbUsers = bacaDatabase();
+          userIndex = dbUsers.findIndex(u => u.id === userId);
+          dbUsers[userIndex].saldo += refundAmount;
+          simpanDatabase(dbUsers);
+      }
+
       simpanTrx(dbTrx);
 
-
-      const keyboardSuccess = [
-        [{ text: `Copy Nomor`, copy_text: { text: phoneNumber }, style: 'primary' }],
-        [
-          { text: 'Cek OTP', callback_data: `cek_otp|${myTrx}`, style: 'success' },
-          { text: 'Batal', callback_data: `cancel|${myTrx}`, style: 'danger' }
-        ]
-      ];
-
-      // Format teks biasa tanpa blockquote
-      const textSuccess = `✅ <b>PESANAN BERHASIL</b>\n\n` +
-                          `📦 Layanan: ${serviceName}\n` +
-                          `📞 Nomor: <code>${phoneNumber}</code>\n` +
-                          `💵 Harga: Rp ${formatRp(finalPrice)}\n` +
-                          `🆔 TRX: <code>${myTrx}</code>\n\n` +
-                          `<i>Segera daftar pakai nomor di atas. Bot sedang mengecek OTP secara otomatis...</i>`;
-
+      // Hapus pesan menu server lama dan kirim pesan pesanan baru
       await bot.deleteMessage(chatId, messageId).catch(() => {});
-      bot.sendMessage(chatId, textSuccess, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboardSuccess } });
       
-      autoCheckOtp(userId, myTrx, providerTrx, chatId, messageId);
+      const initialView = renderOrderView(createdTrxIds, 0);
+      const sentMsg = await bot.sendMessage(chatId, initialView.text, {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: initialView.keyboard }
+      });
+
+      // Simpan daftar ID pesanan & halaman aktif di sesi user untuk navigasi & auto-check
+      userSessions[userId] = {
+          ...userSessions[userId],
+          activeOrderIds: createdTrxIds,
+          activeOrderPage: 0,
+          activeOrderMsgId: sentMsg.message_id
+      };
+
+      // Jalankan autoCheckOtp untuk setiap nomor yang berhasil dipesan
+      createdOrdersData.forEach(ord => {
+          autoCheckOtp(userId, ord.id_trx, ord.provider_trx, chatId, sentMsg.message_id);
+      });
       return;
     }
 
-   
-         // ================= 5. CEK OTP =================
+    // ================= NAVIGASI HALAMAN PESANAN (1/3, 2/3, DST) =================
+    if (data.startsWith('ord_page|')) {
+      const targetIndex = parseInt(data.split('|')[1]) || 0;
+      bot.answerCallbackQuery(query.id);
+
+      const session = userSessions[userId];
+      if (!session || !session.activeOrderIds) {
+          return bot.answerCallbackQuery(query.id, { text: 'Sesi pesanan telah berakhir. Cek melalui Riwayat Transaksi.', show_alert: true });
+      }
+
+      session.activeOrderPage = targetIndex;
+      const view = renderOrderView(session.activeOrderIds, targetIndex);
+      safeEdit(chatId, messageId, view.text, view.keyboard, 'HTML');
+      return;
+    }
+
+    // ================= 5. CEK OTP (MANUAL) =================
     if (data.startsWith('cek_otp|')) {
-      const myTrx = data.split('|')[1];
+      const [, myTrx, pageIndexStr] = data.split('|');
+      const pageIndex = parseInt(pageIndexStr) || 0;
       const dbTrx = bacaTrx();
       const trxData = dbTrx.find(t => t.id_trx === myTrx);
       
@@ -1828,33 +2475,26 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       if (res.status === 'completed' && res.otp_code) {
           trxData.status = 'completed';
           trxData.otp = res.otp_code;
+
+          if (!trxData.log_sent) {
+              trxData.log_sent = true;
+              kirimLogSuksesOTP(trxData, res.otp_code);
+          }
           simpanTrx(dbTrx);
 
-          // === PANGGIL FUNGSI LOG KE CHANNEL ===
-          kirimLogSuksesOTP(trxData, res.otp_code);
-
-          const keyboard = [
-            [{ text: `Copy OTP`, copy_text: { text: String(res.otp_code) }, style: 'success' }],
-            [{ text: 'Kembali ke Layanan', callback_data: 'menu_services', style: 'primary' }]
-          ];
-          
-          const text = `🎉 <b>OTP MASUK!</b>\n\n` +
-                       `🆔 TRX: <code>${myTrx}</code>\n` +
-                       `🔑 Kode OTP: <code>${res.otp_code}</code>\n\n` +
-                       `<i>Silakan salin dan masukkan kode OTP ke aplikasi.</i>`;
-                       
-          safeEdit(chatId, messageId, text, keyboard, 'HTML');
+          const trxList = userSessions[userId]?.activeOrderIds || [myTrx];
+          const view = renderOrderView(trxList, pageIndex);
+          safeEdit(chatId, messageId, view.text, view.keyboard, 'HTML');
       } else {
           bot.answerCallbackQuery(query.id, { text: `⏳ Status: ${res.status || 'waiting'}\nBelum ada OTP yang masuk. Tunggu sebentar lagi ya!`, show_alert: true });
       }
       return;
     }
 
-      
-                       
-    // ================= 6. BATALKAN =================
+    // ================= 6. BATALKAN PESANAN =================
     if (data.startsWith('cancel|')) {
-      const myTrx = data.split('|')[1];
+      const [, myTrx, pageIndexStr] = data.split('|');
+      const pageIndex = parseInt(pageIndexStr) || 0;
       let dbTrx = bacaTrx();
       const trxIndex = dbTrx.findIndex(t => t.id_trx === myTrx);
       const trxData = dbTrx[trxIndex];
@@ -1864,30 +2504,34 @@ showMainMenu(chatId, userId, query.from.username, query.from.first_name);
       const orderTime = new Date(trxData.waktu).getTime();
       const timeDiff = Date.now() - orderTime;
       if (timeDiff < 120000) {
-          return bot.answerCallbackQuery(query.id, { text: '❌ Batal ditolak. Kamu baru bisa membatalkan pesanan setelah 2 menit dari waktu order.', show_alert: true });
+          const sisa = Math.ceil((120000 - timeDiff) / 1000);
+          return bot.answerCallbackQuery(query.id, { text: `❌ Batal ditolak. Tunggu ${sisa} detik lagi untuk membatalkan pesanan.`, show_alert: true });
       }
 
-      bot.answerCallbackQuery(query.id, { text: 'Membatalkan...' });
+      bot.answerCallbackQuery(query.id, { text: 'Membatalkan pesanan...' });
       const res = await cancelOrder(trxData.provider_trx);
       
-      if (res.success) {
+      if (res.success || (res.message && res.message.toLowerCase().includes('batal'))) {
           trxData.status = 'canceled';
           simpanTrx(dbTrx);
 
           let dbUsers = bacaDatabase();
           let userIndex = dbUsers.findIndex(u => u.id === userId);
-          dbUsers[userIndex].saldo += trxData.harga;
-          simpanDatabase(dbUsers);
+          if (userIndex !== -1) {
+              dbUsers[userIndex].saldo += trxData.harga;
+              simpanDatabase(dbUsers);
+          }
 
-          // Teks biasa untuk batal
-          safeEdit(chatId, messageId, `❌ <b>Pesanan Dibatalkan</b>\n\nSaldo Rp ${formatRp(trxData.harga)} telah dikembalikan ke akunmu.`, [[{ text: 'Menu Utama', callback_data: 'menu', style: 'primary' }]], 'HTML');
+          const trxList = userSessions[userId]?.activeOrderIds || [myTrx];
+          const view = renderOrderView(trxList, pageIndex);
+          safeEdit(chatId, messageId, view.text, view.keyboard, 'HTML');
       } else {
           bot.answerCallbackQuery(query.id, { text: '❌ Gagal membatalkan pesanan dari pusat.', show_alert: true });
       }
       return;
     }
 
-  } catch (err) {
+       } catch (err) {
     console.error('[CALLBACK ERROR]', err.message);
     bot.answerCallbackQuery(query.id, { text: `Error sistem: ${err.message}`, show_alert: true });
   }
@@ -1903,39 +2547,49 @@ function autoCheckOtp(userId, myTrx, providerTrx, chatId, messageId) {
     if (attempts > maxAttempts) return clearInterval(interval);
 
     try {
+        let dbTrx = bacaTrx();
+        const trxData = dbTrx.find(t => t.id_trx === myTrx);
+        
+        // Hentikan pengecekan otomatis jika transaksi sudah dibatalkan atau sudah selesai
+        if (!trxData || trxData.status !== 'waiting') {
+            return clearInterval(interval);
+        }
+
         const res = await checkOrderStatus(providerTrx);
 
         if (res.status === 'completed' && res.otp_code) {
           clearInterval(interval);
           
-          let dbTrx = bacaTrx();
-          const trxData = dbTrx.find(t => t.id_trx === myTrx);
-          if (trxData) {
-              trxData.status = 'completed';
-              trxData.otp = res.otp_code;
-              simpanTrx(dbTrx);
+          trxData.status = 'completed';
+          trxData.otp = res.otp_code;
 
-              // === PANGGIL FUNGSI LOG KE CHANNEL ===
+          if (!trxData.log_sent) {
+              trxData.log_sent = true;
               kirimLogSuksesOTP(trxData, res.otp_code);
           }
+          simpanTrx(dbTrx);
 
-          const keyboard = [
-            [{ text: `Copy OTP`, copy_text: { text: String(res.otp_code) }, style: 'success' }],
-            [{ text: 'Kembali ke Layanan', callback_data: 'menu_services', style: 'primary' }]
-          ];
-          
-          const text = `🎉 <b>OTP MASUK!</b>\n\n` +
-                       `🆔 TRX: <code>${myTrx}</code>\n` +
-                       `🔑 Kode OTP: <code>${res.otp_code}</code>\n\n` +
-                       `<i>Silakan salin dan masukkan kode OTP ke aplikasi.</i>`;
-
-          safeEdit(chatId, messageId, text, keyboard, 'HTML');
+          const session = userSessions[userId];
+          // Jika user masih berada di pesan pesanan ini, perbarui tampilannya
+          if (session && session.activeOrderMsgId === messageId && session.activeOrderIds) {
+              const trxIndex = session.activeOrderIds.indexOf(myTrx);
+              // Otomatis arahkan tampilan ke nomor yang baru saja mendapatkan OTP
+              session.activeOrderPage = trxIndex !== -1 ? trxIndex : session.activeOrderPage;
+              const view = renderOrderView(session.activeOrderIds, session.activeOrderPage);
+              safeEdit(chatId, messageId, view.text, view.keyboard, 'HTML');
+          } else {
+              // Fallback jika sesi sudah tertutup (misal user kembali ke menu utama)
+              const view = renderOrderView([myTrx], 0);
+              safeEdit(chatId, messageId, view.text, view.keyboard, 'HTML');
+          }
         }
     } catch (err) {
         console.error("AutoCheck Error:", err.message);
     }
   }, 5000);
 }
+
+
 
 bot.on('message', async (msg) => {
   if (!msg.text) return;

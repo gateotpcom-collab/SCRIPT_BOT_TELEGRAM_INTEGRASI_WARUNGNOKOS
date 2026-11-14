@@ -1,48 +1,56 @@
 module.exports = {
-  BOT_TOKEN: '',
-  //token bot, buat bot di @botfather terus masukin token nya
+  // ================= 1. KREDENSIAL & TOKEN RAHASIA =================
+  // Token bot Telegram yang didapat dari @BotFather
+  BOT_TOKEN: '', 
   
-  API_KEY: '',
-  //apikey warungnokos ambil di https://warungnokos.web.id/profile
+  // API Key utama dari akun WarungNokos (digunakan untuk order OTP & Deposit V1)
+  API_KEY: '', 
   
-  ZAKKI_TOKEN: '',
-  //nanti ku kasih tau web nya
+  // Token khusus deposit dari qris.zpr0.com (digunakan untuk layanan Deposit V2)
+  ZAKKI_TOKEN: '', 
+
+  // ================= 2. ENDPOINT API SERVER =================
+  // Alamat URL pusat untuk layanan pemesanan nomor virtual (OTP)
+  API_BASE: 'https://warungnokos.web.id/api/smscode', 
   
-  API_BASE: 'https://warungnokos.web.id/api/smscode',
-  //base url service/country/server/buy/Cek status/cancel warungnokos.web.id udah bener
+  // Alamat URL pusat untuk pembuatan & pengecekan tagihan QRIS (Deposit V1)
+  API_DEPOSIT: 'https://warungnokos.web.id/api/deposit', 
+
+  // ================= 3. PENGATURAN TELEGRAM & TAUTAN =================
+  // Tautan channel resmi (digunakan untuk tombol "Join Channel" & syarat Force Join)
+  LINK_CHANNEL: 'https://t.me/callbackwarungnokos', 
   
-  API_DEPOSIT: 'https://warungnokos.web.id/api/deposit',
-  //base url deposit warungnokos.web.id udah bener
+  // Tautan langsung ke bot ini (digunakan pada tombol "Ke Bot" di channel log transaksi)
+  LINK_BUY: 'https://t.me/WarkosintegrasiBot', 
   
-  LINK_CHANNEL: 'https://t.me/callbackwarungnokos',
-  //link channel buat force join
+  // ID Channel untuk sistem Force Join (wajib diawali -100, contoh: "-1001234567890")
+  CHANNEL_ID: "-", 
   
-  LINK_BUY: 'https://t.me/WarkosintegrasiBot',
-  //link ini terserah tapi pakai https://t.me/username nya
+  // ID Channel khusus untuk menerima laporan otomatis user baru, deposit sukses, & OTP masuk
+  LOG_CHANNEL: "-", 
   
-  CHANNEL_ID: "-1003838950440",
-  //buat force join, ganti aja
+  // ID Telegram pribadi milik Owner/Admin untuk akses /adminmenu (contoh: "8439294209")
+  ADMIN_ID: "", 
   
-  LOG_CHANNEL: "-1004486668908", // Channel notifikasi user baru dan notifikasi deposit serta pembelian succes
+  // Tautan website utama (muncul pada tombol "Website Order OTP" di riwayat pesanan)
+  WEB_URL: "https://warungnokos.web.id", 
   
-  ADMIN_ID: "8439294209",
-  //id admin ambil di @MissRose_bot
-    
-  WEB_URL: "https://warungnokos.web.id",
-  //ganti ke url website buy otp mu [opsional]
+  // Tautan akun Customer Service / Owner (muncul pada tombol "Laporkan Kendala")
+  CS_URL: "https://t.me/cswarungnokos", 
+
+  // ================= 4. PENGATURAN SISTEM & BIAYA (FEE) =================
+  // Status awal jalur Deposit V1 (true = Aktif, false = Nonaktif). Bisa diubah via /adminmenu
+  DEPO_V1_ACTIVE: true, 
   
-  CS_URL: "https://t.me/cswarungnokos",
-  //ganti ke username tele mu
- 
-  DEPO_V1_ACTIVE: true, // jangan di apa apain, soalnya sudah ada fitur nya di halaman /adminmenu
+  // Status awal jalur Deposit V2 (true = Aktif, false = Nonaktif). Bisa diubah via /adminmenu
+  DEPO_V2_ACTIVE: true, 
   
-  DEPO_V2_ACTIVE: true, // jangan di apa apain, soalnya sudah ada fitur nya di halaman /adminmenu
+  // Biaya tambahan tetap dalam nominal Rupiah untuk deposit (isi 0 jika hanya pakai persen)
+  FEE_DEPOSIT: 0, 
   
-   FEE_DEPOSIT: 0, // Mendukung desimal (0.7) atau bilangan bulat (1, 10) [untuk deposit v1]
-   
-  FEE_PERCENT: 0,
-  //fee layanan order otp nya
+  // Persentase keuntungan (margin) yang ditambahkan ke harga dasar setiap layanan OTP (contoh: 10 berarti +10%)
+  FEE_PERCENT: 0, 
   
-  FEE_DEPOSIT_PERCENT: 5
-  //untuk deposit v2
+  // Persentase biaya admin yang dibebankan ke user saat melakukan deposit (contoh: 5 berarti +5%)
+  FEE_DEPOSIT_PERCENT: 5 
 };
